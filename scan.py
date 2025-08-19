@@ -7,7 +7,7 @@ ib = IB()
 ib.connect('127.0.0.1', 7497, clientId=1)
 
 sub = ScannerSubscription(numberOfRows=50, instrument='STK',locationCode='STK.US.MAJOR',
-                          scanCode="HOT_BY_VOLUME",marketCapAbove=1000,abovePrice=5,aboveVolume=300000,stockTypeFilter='CORP')
+                          scanCode="HOT_BY_VOLUME",marketCapAbove=1000,abovePrice=10,aboveVolume=3000000,stockTypeFilter='CORP')
 
 
 scanData = ib.reqScannerData(sub)
@@ -52,10 +52,13 @@ def display_stock_with_marketdata(scanData, ticker_dict):
     # Merge
     df_merged = df.merge(market_data_df, on='symbol', how='left')
 
-    # Compute % change safely
+    # Compute % Change safely
     df_merged['% Change'] = ((df_merged['last'] - df_merged['close']) / df_merged['close'] * 100).round(2)
 
-    return df_merged[['rank','symbol','close','last','bid','ask','% Change']]
+    # ✅ Capitalize column names after merge
+    df_merged.rename(columns=lambda c: c.capitalize() if not c.startswith('%') else c, inplace=True)
+
+    return df_merged[['Rank', 'Symbol', 'Close', 'Last', 'Bid', 'Ask', '% Change']]
 
 
 #print(display_stock_with_marketdata(scanData, ticker_dict))
@@ -99,18 +102,12 @@ def handle_incoming_dataframe_intraday(
         print(f"An error occurred while processing the data: {e}")
 
 
-
+# Today's Volume
 def fetch_total_volume(df_stocks, ib):
-    """
-    Fetch 2-min bars for each symbol and compute total daily volume 
-    using processed DataFrame (with timezone & cleaning applied).
-    
-    Returns:
-        pd.DataFrame: DataFrame with 'symbol' and 'total_volume'
-    """
+
     total_volumes = []
 
-    for symbol in df_stocks['symbol']:
+    for symbol in df_stocks['Symbol']:
         # Create an IB contract
         contract = Stock(symbol, 'SMART', 'USD')
         contract.primaryExchange = 'ARCA'
@@ -128,7 +125,7 @@ def fetch_total_volume(df_stocks, ib):
 
         if not bars:
             print(f"No historical data for {symbol}")
-            total_volumes.append({'symbol': symbol, 'total_volume': None})
+            total_volumes.append({'Symbol': symbol, 'Total_volume': None})
             continue
 
         # Convert to DataFrame
@@ -143,7 +140,7 @@ def fetch_total_volume(df_stocks, ib):
 
         if processed_df is None or processed_df.empty:
             print(f"No processed data for {symbol}")
-            total_volumes.append({'Symbol': symbol, 'total_volume': None})
+            total_volumes.append({'Symbol': symbol, 'Total_volume': None})
             continue
 
         # ✅ Sum volume from processed DataFrame
@@ -153,33 +150,28 @@ def fetch_total_volume(df_stocks, ib):
         # ✅ Print processed bars (cleaned)
         print(processed_df[['Date', 'Time', 'Open', 'High', 'Low', 'Close', 'Volume']])
 
-        total_volumes.append({'Symbol': symbol, 'total_volume': total_volume})
+        total_volumes.append({'Symbol': symbol, 'Total_volume': total_volume})
 
     return pd.DataFrame(total_volumes)
 
 
-
+# Fetch historical data for each stock symbol
 def fetch_historydata(df_stocks, ib, days=5):
-    """
-    Fetch historical intraday data for each symbol and calculate
-    the average volume per time bucket over the past N days.
 
-    Returns a single DataFrame with columns: ['symbol', 'Time', 'avg_volume_Xd']
-    """
     all_results = []
 
-    for symbol in df_stocks['symbol']:
+    for symbol in df_stocks['Symbol']:
         # Create an IB contract
         contract = Stock(symbol, 'SMART', 'USD')
         contract.primaryExchange = 'ARCA'
 
-        # Request historical 2-min bars (past N days)
+        # Request historical 2-min bars (past 5 days)
         bars = ib.reqHistoricalData(
             contract,
             endDateTime="",
-            durationStr=f'{days} D',
-            barSizeSetting='2 mins',
-            whatToShow='TRADES',
+            durationStr=f"{days} D",
+            barSizeSetting="2 mins",
+            whatToShow="TRADES",
             useRTH=False,
             formatDate=1
         )
@@ -191,7 +183,7 @@ def fetch_historydata(df_stocks, ib, days=5):
         # Convert to DataFrame
         bars_df = pd.DataFrame([bar.__dict__ for bar in bars])
 
-        # Apply preprocessing (your timezone & cleaning logic)
+        # Apply preprocessing (timezone & cleaning logic)
         processed_df = handle_incoming_dataframe_intraday(
             bars_df=bars_df,
             symbol=contract.symbol,
@@ -202,22 +194,11 @@ def fetch_historydata(df_stocks, ib, days=5):
             print(f"No processed data for {symbol}")
             continue
 
-        # Ensure proper datetime
-        processed_df['Date'] = pd.to_datetime(processed_df['Date'])
-
-        # Calculate average volume per time bucket
-        avg_vol_df = (
-            processed_df.groupby('Time')['Volume']
-            .mean()
-            .reset_index()
-            .rename(columns={'Volume': f'avg_volume_{days}d'})
-        )
-
-        avg_vol_df['Symbol'] = symbol
-        all_results.append(avg_vol_df)
+        processed_df["Symbol"] = symbol
+        all_results.append(processed_df)
 
     if not all_results:
-        return pd.DataFrame(columns=['Symbol', 'Time', f'avg_volume_{days}d'])
+        return pd.DataFrame(columns=["Symbol", "Date", "Time", "Open", "High", "Low", "Close", "Volume"])
 
     # Concatenate all symbols into a single DataFrame
     return pd.concat(all_results, ignore_index=True)
@@ -226,17 +207,7 @@ def fetch_historydata(df_stocks, ib, days=5):
 
 
 def calculate_total_avg_volume(all_processed_dfs, avg_volumes_dict):
-    """
-    Loop through each symbol's intraday data, merge with its
-    5-day average volume DataFrame, and compute totals.
-    
-    Parameters:
-        all_processed_dfs (dict): {symbol: intraday_df}
-        avg_volumes_dict (dict): {symbol: avg_volume_df}
-    
-    Returns:
-        pd.DataFrame: summary with actual and 5-day average totals
-    """
+
     results = []
 
     for symbol, processed_df in all_processed_dfs.items():
@@ -271,18 +242,19 @@ def calculate_total_avg_volume(all_processed_dfs, avg_volumes_dict):
 
 
 df_stocks = display_stock_with_marketdata(scanData, ticker_dict)
-df_historydatas = fetch_historydata(df_stocks, ib)
+#print(df_stocks)
 
-#print(df_historydatas)
 
-df_volumes = fetch_total_volume(df_stocks, ib)
+df_historydata = fetch_historydata(df_stocks, ib, days=5)
+print(df_historydata)
 
-# # 3️⃣ Merge total volumes into df_stocks
-df_stocks = df_stocks.merge(df_volumes, on='symbol', how='left')
 
-# # Sort by total volume descending
-df_stocks_sorted = df_stocks.sort_values(by='total_volume', ascending=False)
+# df_volumes = fetch_total_volume(df_stocks, ib)
 
-#print(df_stocks_sorted)
-print(df_historydatas)
-print(df_stocks_sorted)
+# # # # 3️⃣ Merge total volumes into df_stocks
+# df_stocks = df_stocks.merge(df_volumes, on='Symbol', how='left')
+
+# # # # Sort by total volume descending
+# df_stocks_sorted = df_stocks.sort_values(by='Total_volume', ascending=False)
+
+# print(df_stocks_sorted)
