@@ -1,17 +1,19 @@
 from ib_insync import *
-util.startLoop()
+#util.startLoop()
 import pandas as pd
 from AdjustTimezone import adjust_timezone_IB_data
+import os
+from datetime import datetime
 
 ib = IB()
 ib.connect('127.0.0.1', 7497, clientId=1)
 
 sub = ScannerSubscription(numberOfRows=50, instrument='STK',locationCode='STK.US.MAJOR',
-                          scanCode="HOT_BY_VOLUME",marketCapAbove=1000,abovePrice=10,aboveVolume=3000000,stockTypeFilter='CORP')
+                          scanCode="HOT_BY_VOLUME",marketCapAbove=1000,abovePrice=10,aboveVolume=100000,stockTypeFilter='CORP')
 
 
 scanData = ib.reqScannerData(sub)
-
+#print(scanData)
 
 
 def display_with_stock_symbol(scanData):
@@ -26,7 +28,7 @@ def display_with_stock_symbol(scanData):
 ticker_dict = {}
 for contract in display_with_stock_symbol(scanData)['contract'].tolist():
     ticker_dict[contract] = ib.reqMktData(contract=contract, genericTickList="",snapshot=True,regulatorySnapshot=False)
-ib.sleep(3)
+ib.sleep(2)
 
 #print(util.df(ticker_dict.values())[['close', 'last', 'bid', 'ask']])
 
@@ -61,7 +63,7 @@ def display_stock_with_marketdata(scanData, ticker_dict):
     return df_merged[['Rank', 'Symbol', 'Close', 'Last', 'Bid', 'Ask', '% Change']]
 
 
-#print(display_stock_with_marketdata(scanData, ticker_dict))
+
 
 
 
@@ -102,140 +104,50 @@ def handle_incoming_dataframe_intraday(
         print(f"An error occurred while processing the data: {e}")
 
 
-# Today's Volume
-def fetch_total_volume(df_stocks, ib):
+def fetch_historydata_by_symbol(symbol, ib, days):
+    """
+    Fetch historical intraday data (2-min bars) for a single symbol.
+    """
 
-    total_volumes = []
+    # Create an IB contract
+    contract = Stock(symbol, 'SMART', 'USD')
+    contract.primaryExchange = 'ARCA'
 
-    for symbol in df_stocks['Symbol']:
-        # Create an IB contract
-        contract = Stock(symbol, 'SMART', 'USD')
-        contract.primaryExchange = 'ARCA'
+    # Request historical 2-min bars
+    bars = ib.reqHistoricalData(
+        contract,
+        endDateTime="",
+        durationStr=f"{days} D",
+        barSizeSetting="2 mins",
+        whatToShow="TRADES",
+        useRTH=False,   # include premarket
+        formatDate=1
+    )
 
-        # Request historical 2-min bars (full day)
-        bars = ib.reqHistoricalData(
-            contract,
-            endDateTime="",
-            durationStr='1 D',
-            barSizeSetting='2 mins',
-            whatToShow='TRADES',
-            useRTH=False,   # include premarket
-            formatDate=1
-        )
-
-        if not bars:
-            print(f"No historical data for {symbol}")
-            total_volumes.append({'Symbol': symbol, 'Total_volume': None})
-            continue
-
-        # Convert to DataFrame
-        bars_df = pd.DataFrame([bar.__dict__ for bar in bars])
-
-        # ✅ Apply preprocessing (timezone + cleaning)
-        processed_df = handle_incoming_dataframe_intraday(
-            bars_df=bars_df,
-            symbol=contract.symbol,
-            adjust_timezone_IB_data=adjust_timezone_IB_data
-        )
-
-        if processed_df is None or processed_df.empty:
-            print(f"No processed data for {symbol}")
-            total_volumes.append({'Symbol': symbol, 'Total_volume': None})
-            continue
-
-        # ✅ Sum volume from processed DataFrame
-        total_volume = processed_df['Volume'].sum()
-        print(f"\n{symbol} - Total processed volume: {total_volume}")
-
-        # ✅ Print processed bars (cleaned)
-        print(processed_df[['Date', 'Time', 'Open', 'High', 'Low', 'Close', 'Volume']])
-
-        total_volumes.append({'Symbol': symbol, 'Total_volume': total_volume})
-
-    return pd.DataFrame(total_volumes)
-
-
-# Fetch historical data for each stock symbol
-def fetch_historydata(df_stocks, ib, days=5):
-
-    all_results = []
-
-    for symbol in df_stocks['Symbol']:
-        # Create an IB contract
-        contract = Stock(symbol, 'SMART', 'USD')
-        contract.primaryExchange = 'ARCA'
-
-        # Request historical 2-min bars (past 5 days)
-        bars = ib.reqHistoricalData(
-            contract,
-            endDateTime="",
-            durationStr=f"{days} D",
-            barSizeSetting="2 mins",
-            whatToShow="TRADES",
-            useRTH=False,
-            formatDate=1
-        )
-
-        if not bars:
-            print(f"No historical data for {symbol}")
-            continue
-
-        # Convert to DataFrame
-        bars_df = pd.DataFrame([bar.__dict__ for bar in bars])
-
-        # Apply preprocessing (timezone & cleaning logic)
-        processed_df = handle_incoming_dataframe_intraday(
-            bars_df=bars_df,
-            symbol=contract.symbol,
-            adjust_timezone_IB_data=adjust_timezone_IB_data
-        )
-
-        if processed_df is None or processed_df.empty:
-            print(f"No processed data for {symbol}")
-            continue
-
-        processed_df["Symbol"] = symbol
-        all_results.append(processed_df)
-
-    if not all_results:
+    if not bars:
+        print(f"No historical data for {symbol}")
         return pd.DataFrame(columns=["Symbol", "Date", "Time", "Open", "High", "Low", "Close", "Volume"])
 
-    # Concatenate all symbols into a single DataFrame
-    return pd.concat(all_results, ignore_index=True)
+    # Convert to DataFrame
+    bars_df = pd.DataFrame([bar.__dict__ for bar in bars])
+
+    # Apply preprocessing (timezone & cleaning logic)
+    processed_df = handle_incoming_dataframe_intraday(
+        bars_df=bars_df,
+        symbol=contract.symbol,
+        adjust_timezone_IB_data=adjust_timezone_IB_data
+    )
+
+    if processed_df is None or processed_df.empty:
+        print(f"No processed data for {symbol}")
+        return pd.DataFrame(columns=["Symbol", "Date", "Time", "Open", "High", "Low", "Close", "Volume"])
+
+    # Add symbol column
+    processed_df["Symbol"] = symbol
+    return processed_df
 
 
 
-
-def calculate_total_avg_volume(all_processed_dfs, avg_volumes_dict):
-
-    results = []
-
-    for symbol, processed_df in all_processed_dfs.items():
-        if symbol not in avg_volumes_dict:
-            print(f"⚠️ No 5-day avg volume data for {symbol}, skipping")
-            continue
-
-        avg_volume_df = avg_volumes_dict[symbol]
-
-        # Merge on Time
-        merged = processed_df.merge(avg_volume_df, on="Time", how="inner")
-
-        # Totals
-        actual_total = merged["Volume"].sum()
-        avg_total = merged["avg_volume_5d"].sum()
-
-        print(f"\n--- {symbol} ---")
-        print(merged[['Date', 'Time', 'Volume', 'avg_volume_5d']].head(10))
-        print(f"Actual total volume: {actual_total}")
-        print(f"Total 5-day avg volume: {avg_total}")
-
-        results.append({
-            "symbol": symbol,
-            "actual_total_volume": actual_total,
-            "avg_total_volume": avg_total
-        })
-
-    return pd.DataFrame(results)
 
 
 
@@ -244,17 +156,222 @@ def calculate_total_avg_volume(all_processed_dfs, avg_volumes_dict):
 df_stocks = display_stock_with_marketdata(scanData, ticker_dict)
 #print(df_stocks)
 
+def fetch_history_data(df_stocks, ib, days):
+    """
+    Fetch 5-day historical intraday data (2-min bars) for all symbols.
+    Returns a list of DataFrames, one per symbol.
+    """
+    day5_history_datas = []
 
-df_historydata = fetch_historydata(df_stocks, ib, days=5)
-print(df_historydata)
+    for symbol in df_stocks["Symbol"]:
+        df_history_symbol = fetch_historydata_by_symbol(symbol, ib, days=days)
+        if not df_history_symbol.empty:
+            day5_history_datas.append(df_history_symbol)
+
+    return day5_history_datas
 
 
-# df_volumes = fetch_total_volume(df_stocks, ib)
+def calculate_avg_volume(day5_history_datas):
+    """
+    Calculate average volume per 2-min bar for each symbol.
+    Returns a list of DataFrames with columns: Symbol, Time, Avg_volume
+    """
+    avg_volumes = []
 
-# # # # 3️⃣ Merge total volumes into df_stocks
-# df_stocks = df_stocks.merge(df_volumes, on='Symbol', how='left')
+    for df_history_symbol in day5_history_datas:
+        symbol = df_history_symbol["Symbol"].iloc[0]
 
-# # # # Sort by total volume descending
-# df_stocks_sorted = df_stocks.sort_values(by='Total_volume', ascending=False)
+        # Group by (Symbol, Time) and average only Volume
+        df_avg = (
+            df_history_symbol
+            .groupby(["Symbol", "Time"], as_index=False)["Volume"]
+            .mean()
+            .rename(columns={"Volume": "Avg_volume"})
+        )
 
-# print(df_stocks_sorted)
+        avg_volumes.append(df_avg)
+
+        # print(f"\n===== {symbol} - Avg Volumes =====")
+        # print(df_avg)
+
+    return avg_volumes
+
+
+
+# 1️⃣ Fetch raw 5-day history
+day5_history_datas = fetch_history_data(df_stocks, ib, days=5)
+
+# 2️⃣ Calculate average volumes
+avg_volumes = calculate_avg_volume(day5_history_datas)
+
+
+# Create folder if not exists
+os.makedirs("avg_volume_csvs", exist_ok=True)
+
+for df_avg in avg_volumes:
+    symbol = df_avg["Symbol"].iloc[0]
+    filename = f"avg_volume_csvs/{symbol}_avg_volume.csv"
+    df_avg.to_csv(filename, index=False)
+
+
+
+def compare_to_avg_volume(df_new, df_avg_model):
+
+ 
+
+    # Merge by Symbol & Time
+    df_merge = pd.merge(
+        df_new[["Symbol", "Time", "Volume"]],
+        df_avg_model,
+        on=["Symbol", "Time"],
+        how="left"
+    )
+
+    # Compute relative volume (Rvol = Volume / Avg_volume)
+    df_merge["Rvol"] = df_merge["Volume"] / df_merge["Avg_volume"]
+
+    # Optional: keep only relevant columns
+    Rvol_data = df_merge[["Symbol", "Time", "Volume", "Avg_volume", "Rvol"]]
+
+    return Rvol_data
+
+
+
+# Fetch today's data
+
+df_today_volumes = fetch_history_data(df_stocks, ib, days=1)
+#print(df_today_volumes)
+
+
+def compare_and_save_rvolumes(df_today_volumes, avg_volumes, output_folder="rvol"):
+
+    # Ensure output folder exists
+    os.makedirs(output_folder, exist_ok=True)
+
+    all_Rvol_data = []
+
+    for df_today in df_today_volumes:
+        symbol = df_today["Symbol"].iloc[0]
+
+        # Find matching avg volume
+        df_avg = next((df for df in avg_volumes if df["Symbol"].iloc[0] == symbol), None)
+        if df_avg is None:
+            print(f"No avg volume data for {symbol}, skipping.")
+            continue
+
+        # Merge on Time
+        df_merged = df_today.merge(df_avg[['Time', 'Avg_volume']], on='Time', how='inner')
+
+        # Compute Rvol
+        df_merged['Rvol'] = (df_merged['Volume'] / df_merged['Avg_volume']).round(2)
+
+        # Keep relevant columns
+        df_result = df_merged[['Symbol', 'Date', 'Time', 'Volume', 'Avg_volume', 'Rvol']]
+
+        all_Rvol_data.append(df_result)
+
+        # Save per symbol
+        filename = os.path.join(output_folder, f"{symbol}_Rvol.csv")
+        df_result.to_csv(filename, index=False)
+
+
+    # Combine all symbols
+    if all_Rvol_data:
+        Rvol_data_all = pd.concat(all_Rvol_data, ignore_index=True)
+
+        filename_all = os.path.join(output_folder, "All_symbols_Rvol.csv")
+        Rvol_data_all.to_csv(filename_all, index=False)
+        print(f"Saved {filename_all}")
+
+        return Rvol_data_all
+    else:
+        print("No Rvol data generated.")
+        return pd.DataFrame()
+
+
+Rvol_data = compare_and_save_rvolumes(df_today_volumes, avg_volumes)
+
+
+
+
+def round_to_nearest_2min(time_str):
+    """
+    Round a time string (HH:MM) to the nearest 2-minute mark.
+    """
+    t = datetime.strptime(time_str, "%H:%M")
+    minute = (t.minute // 2) * 2   # floor to nearest multiple of 2
+    rounded = t.replace(minute=minute, second=0, microsecond=0)
+    return rounded.strftime("%H:%M")
+
+def calculate_mean_rvol(Rvol_data, end_time, start_time):
+
+    # Filter by time window
+    df_filtered = Rvol_data[
+        (Rvol_data["Time"] >= start_time) & (Rvol_data["Time"] <= end_time)
+    ].copy()
+
+    if df_filtered.empty:
+        print(f"No data available between {start_time} and {end_time}.")
+        return pd.DataFrame()
+
+    # Group by symbol and compute mean Rvol
+    df_mean = (
+        df_filtered.groupby("Symbol", as_index=False)["Rvol"]
+        .mean()
+        .round(2)
+        .rename(columns={"Rvol": "Mean_Rvol"})
+    )
+
+    # Add start and end times as columns
+    df_mean["Start_Time"] = start_time
+    df_mean["End_Time"] = end_time
+
+    return df_mean
+
+def cumulative_volume_list(df_list, end_time, start_time):
+
+    
+    results = []
+    
+    for df in df_list:
+        symbol = df['Symbol'].iloc[0]
+        df_filtered = df[(df['Time'] >= start_time) & (df['Time'] <= end_time)]
+        cum_vol = df_filtered['Volume'].sum() if not df_filtered.empty else 0.0
+        results.append({'Symbol': symbol, 'Cumulative_Volume': cum_vol})
+    
+    return pd.DataFrame(results)
+
+
+
+# Try to get end_time from last row of today's data
+try:
+    end_time = round_to_nearest_2min(df_today_volumes[0].iloc[-1]["Time"])
+    if end_time < "11:00":
+        end_time = "11:00"
+except Exception as e:
+    print(f"Could not determine end_time from df_today: {e}")
+
+
+# Calculate mean Rvol using the function
+mean_rvols = calculate_mean_rvol(Rvol_data, end_time=end_time, start_time="11:00")
+
+# Example usage:
+cum_vol_df = cumulative_volume_list(df_today_volumes,end_time=end_time, start_time="11:00")
+
+
+
+
+# Merge by Symbol
+df_merged = pd.merge(df_stocks, mean_rvols, on="Symbol", how="left")
+
+# Sort by Mean_Rvol descending
+df_sorted = df_merged.sort_values(by="Mean_Rvol", ascending=False).reset_index(drop=True)
+
+#print(df_sorted)
+
+
+# # # # # 3️⃣ Merge total volumes into df_stocks
+df_frame = df_sorted.merge(cum_vol_df, on='Symbol', how='left')
+
+
+print(df_frame)
